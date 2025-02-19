@@ -86,6 +86,13 @@ impl DailyRotateFile {
         false
     }
 
+    fn rotate(&self) {
+        let new_file =
+            Self::create_file(&self.options, &Local::now()).expect("Failed to rotate log file");
+        let mut file_lock = self.file.lock().unwrap();
+        *file_lock = BufWriter::new(new_file);
+    }
+
     pub fn builder() -> DailyRotateFileBuilder {
         DailyRotateFileBuilder::new()
     }
@@ -94,10 +101,7 @@ impl DailyRotateFile {
 impl Transport for DailyRotateFile {
     fn log(&self, info: LogInfo) {
         if self.should_rotate() {
-            let new_file =
-                Self::create_file(&self.options, &Local::now()).expect("Failed to rotate log file");
-            let mut file_lock = self.file.lock().unwrap();
-            *file_lock = BufWriter::new(new_file);
+            self.rotate();
         }
 
         let mut file = match self.file.lock() {
