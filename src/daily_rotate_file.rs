@@ -1,4 +1,4 @@
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use logform::{Format, LogInfo};
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -15,17 +15,23 @@ pub struct DailyRotateFileOptions {
     pub max_size: Option<u64>, // in bytes
     pub dirname: Option<PathBuf>,
     pub zipped_archive: bool,
+    pub utc: bool,
 }
 
 pub struct DailyRotateFile {
     file: Mutex<BufWriter<File>>,
     options: DailyRotateFileOptions,
-    last_rotation: Mutex<DateTime<Local>>,
+    last_rotation: Mutex<DateTime<Utc>>,
 }
 
 impl DailyRotateFile {
     pub fn new(options: DailyRotateFileOptions) -> Self {
-        let current_date = Local::now();
+        let current_date = if options.utc {
+            Utc::now()
+        } else {
+            Local::now().with_timezone(&Utc)
+        };
+
         let file =
             Self::create_file(&options, &current_date).expect("Failed to create initial log file");
 
@@ -38,9 +44,10 @@ impl DailyRotateFile {
 
     fn create_file(
         options: &DailyRotateFileOptions,
-        date: &DateTime<Local>,
+        date: &DateTime<Utc>,
     ) -> std::io::Result<std::fs::File> {
-        let filename = Self::get_filename(&options.filename, date, &options.date_pattern);
+        let filename =
+            Self::get_filename(&options.filename, date, &options.date_pattern, options.utc);
 
         //let cwd = std::env::current_dir().unwrap();
         let default_dir = ".";
@@ -59,8 +66,12 @@ impl DailyRotateFile {
         OpenOptions::new().create(true).append(true).open(full_path)
     }
 
-    fn get_filename(base_path: &Path, date: &DateTime<Local>, pattern: &str) -> PathBuf {
-        let date_str = date.format(pattern).to_string();
+    fn get_filename(base_path: &Path, date: &DateTime<Utc>, pattern: &str, utc: bool) -> PathBuf {
+        let date_str = if utc {
+            date.format(pattern).to_string()
+        } else {
+            date.with_timezone(&Local).format(pattern).to_string()
+        };
 
         let mut filename = base_path.to_path_buf();
         let original_filename = filename
@@ -73,24 +84,38 @@ impl DailyRotateFile {
     }
 
     fn should_rotate(&self) -> bool {
-        let now = Local::now();
-        let now_str = now.format(&self.options.date_pattern).to_string();
+        let now = Utc::now();
 
-        let mut last_rotation = self.last_rotation.lock().unwrap();
-        let last_rotation_str = last_rotation.format(&self.options.date_pattern).to_string();
+        let now_str = if self.options.utc {
+            now.format(&self.options.date_pattern).to_string()
+        } else {
+            now.with_timezone(&Local)
+                .format(&self.options.date_pattern)
+                .to_string()
+        };
 
-        if last_rotation_str != now_str {
-            *last_rotation = now;
-            return true;
-        }
-        false
+        let last_rotation = self.last_rotation.lock().unwrap();
+        let last_rotation_str = if self.options.utc {
+            last_rotation.format(&self.options.date_pattern).to_string()
+        } else {
+            last_rotation
+                .with_timezone(&Local)
+                .format(&self.options.date_pattern)
+                .to_string()
+        };
+
+        last_rotation_str != now_str
     }
 
     fn rotate(&self) {
-        let new_file =
-            Self::create_file(&self.options, &Local::now()).expect("Failed to rotate log file");
+        let now = Utc::now();
+        let new_file = Self::create_file(&self.options, &now).expect("Failed to rotate log file");
+
         let mut file_lock = self.file.lock().unwrap();
         *file_lock = BufWriter::new(new_file);
+
+        let mut last_rotation = self.last_rotation.lock().unwrap();
+        *last_rotation = now;
     }
 
     pub fn builder() -> DailyRotateFileBuilder {
@@ -141,6 +166,7 @@ pub struct DailyRotateFileBuilder {
     max_size: Option<u64>,
     dirname: Option<PathBuf>,
     zipped_archive: bool,
+    utc: bool,
 }
 
 impl DailyRotateFileBuilder {
@@ -154,6 +180,7 @@ impl DailyRotateFileBuilder {
             max_size: None,
             dirname: None,
             zipped_archive: false,
+            utc: false,
         }
     }
 
@@ -197,6 +224,11 @@ impl DailyRotateFileBuilder {
         self
     }
 
+    pub fn utc(mut self, utc: bool) -> Self {
+        self.utc = utc;
+        self
+    }
+
     pub fn build(self) -> Result<DailyRotateFile, String> {
         let filename = self.filename.ok_or("Filename is required")?;
 
@@ -209,6 +241,7 @@ impl DailyRotateFileBuilder {
             max_size: self.max_size,
             dirname: self.dirname,
             zipped_archive: self.zipped_archive,
+            utc: self.utc,
         };
 
         Ok(DailyRotateFile::new(options))
