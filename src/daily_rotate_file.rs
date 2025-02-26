@@ -291,4 +291,38 @@ mod tests {
         let contents = fs::read_to_string(log_file).expect("Failed to read log file");
         assert!(contents.contains("Test message"));
     }
+
+    #[test]
+    fn test_date_based_rotation() {
+        let temp_dir = setup_temp_dir();
+        let log_path = temp_dir.path().join("test.log");
+        let transport = DailyRotateFile::builder()
+            .filename(log_path)
+            .date_pattern("%Y-%m-%d_%H-%M-%S")
+            .build()
+            .expect("Failed to create transport");
+
+        transport.log(LogInfo {
+            level: "info".to_string(),
+            message: "log entry 1".to_string(),
+            meta: Default::default(),
+        });
+
+        // Simulate date change
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        transport.log(LogInfo {
+            level: "info".to_string(),
+            message: "log entry 2".to_string(),
+            meta: Default::default(),
+        });
+
+        transport.flush().expect("Failed to flush");
+
+        let files: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(files.len(), 2, "Expected two log files after date rotation");
+    }
 }
