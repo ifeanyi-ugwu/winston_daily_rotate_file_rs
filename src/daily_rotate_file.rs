@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use logform::{Format, LogInfo};
 use std::fs::{create_dir_all, File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use winston_transport::Transport;
@@ -49,21 +49,49 @@ impl DailyRotateFile {
         let filename =
             Self::get_filename(&options.filename, date, &options.date_pattern, options.utc);
 
-        //let cwd = std::env::current_dir().unwrap();
-        let default_dir = ".";
-        let log_dir = options
-            .dirname
-            .as_deref()
-            .unwrap_or_else(|| Path::new(default_dir));
-        let full_path = log_dir.join(filename);
+        let log_dir = options.dirname.as_deref().unwrap_or_else(|| Path::new("."));
+        let full_path = log_dir.join(&filename);
 
-        //println!("Final log filename: {:?}", full_path);
-
-        let parent = full_path.parent().unwrap_or(&log_dir);
-        //println!("Creating directory: {:?}", parent);
+        let parent = full_path.parent().unwrap_or(log_dir);
         create_dir_all(parent)?;
 
-        OpenOptions::new().create(true).append(true).open(full_path)
+        Self::create_unique_file(log_dir, &filename)
+    }
+
+    fn create_unique_file(log_dir: &Path, filename: &Path) -> std::io::Result<std::fs::File> {
+        let mut counter = 0;
+        loop {
+            let new_filename = if counter == 0 {
+                filename.to_path_buf()
+            } else {
+                let base_name = filename
+                    .file_stem()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("log"));
+                let ext = filename.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+                let mut unique_filename = filename.to_path_buf();
+                unique_filename.set_file_name(if ext.is_empty() {
+                    format!("{}_{}", base_name.to_string_lossy(), counter)
+                } else {
+                    format!("{}_{}.{}", base_name.to_string_lossy(), counter, ext)
+                });
+
+                log_dir.join(unique_filename)
+            };
+
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&new_filename)
+            {
+                Ok(file) => return Ok(file),
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    counter += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     fn get_filename(base_path: &Path, date: &DateTime<Utc>, pattern: &str, utc: bool) -> PathBuf {
@@ -81,6 +109,17 @@ impl DailyRotateFile {
 
         filename.set_file_name(format!("{}.{}", original_filename, date_str));
         filename
+    }
+
+    fn get_file_size(&self) -> u64 {
+        self.file
+            .lock()
+            .ok()
+            .and_then(|mut file_guard| {
+                file_guard.flush().ok()?;
+                file_guard.get_ref().metadata().ok().map(|m| m.len())
+            })
+            .unwrap_or(0)
     }
 
     fn should_rotate(&self) -> bool {
@@ -104,7 +143,14 @@ impl DailyRotateFile {
                 .to_string()
         };
 
-        last_rotation_str != now_str
+        if last_rotation_str != now_str {
+            return true;
+        }
+
+        self.options
+            .max_size
+            .map(|max_size| self.get_file_size() >= max_size)
+            .unwrap_or(false)
     }
 
     fn rotate(&self) {
@@ -128,6 +174,7 @@ impl Transport for DailyRotateFile {
         if self.should_rotate() {
             self.rotate();
         }
+        //println!("File size before: {}", self.get_file_size());
 
         let mut file = match self.file.lock() {
             Ok(f) => f,
@@ -141,6 +188,10 @@ impl Transport for DailyRotateFile {
             eprintln!("Failed to write log: {}", e);
             return;
         }
+
+        //drop(file);
+
+        //println!("File size after: {}", self.get_file_size()); //deadlocks
     }
 
     fn flush(&self) -> Result<(), String> {
@@ -324,5 +375,39 @@ mod tests {
             .filter_map(|entry| entry.ok())
             .collect();
         assert_eq!(files.len(), 2, "Expected two log files after date rotation");
+    }
+
+    #[test]
+    fn test_size_based_rotation() {
+        let temp_dir = setup_temp_dir();
+        let transport = DailyRotateFile::builder()
+            .filename(temp_dir.path().join("test.log"))
+            //.filename("logs/test.log")
+            .max_size(100)
+            .build()
+            .expect("Failed to create transport");
+
+        let log_message = "This is a test log message that should exceed the max file size.";
+        let log_info = LogInfo {
+            level: "info".to_string(),
+            message: log_message.to_string(),
+            meta: Default::default(),
+        };
+
+        // Write multiple logs until rotation occurs
+        for _ in 0..10 {
+            transport.log(log_info.clone());
+        }
+
+        transport.flush().expect("Failed to flush");
+
+        // Check if multiple log files were created
+        let files: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .collect();
+
+        //println!("{}", files.len());
+        assert_eq!(files.len(), 5, "Expected 5 log files due to size rotation");
     }
 }
