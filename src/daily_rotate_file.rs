@@ -122,7 +122,7 @@ impl DailyRotateFile {
             .unwrap_or(0)
     }
 
-    fn should_rotate(&self) -> bool {
+    fn should_rotate(&self, new_entry_size: usize) -> bool {
         let now = Utc::now();
 
         let now_str = if self.options.utc {
@@ -149,7 +149,7 @@ impl DailyRotateFile {
 
         self.options
             .max_size
-            .map(|max_size| self.get_file_size() >= max_size)
+            .map(|max_size| self.get_file_size() + new_entry_size as u64 >= max_size)
             .unwrap_or(false)
     }
 
@@ -171,7 +171,9 @@ impl DailyRotateFile {
 
 impl Transport for DailyRotateFile {
     fn log(&self, info: LogInfo) {
-        if self.should_rotate() {
+        let entry_size = format!("{}\n", info.message).len();
+
+        if self.should_rotate(entry_size) {
             self.rotate();
         }
         //println!("File size before: {}", self.get_file_size());
@@ -408,6 +410,10 @@ mod tests {
             .collect();
 
         //println!("{}", files.len());
-        assert_eq!(files.len(), 5, "Expected 5 log files due to size rotation");
+        assert_eq!(
+            files.len(),
+            10,
+            "Expected 10 log files due to size rotation"
+        );
     }
 }
