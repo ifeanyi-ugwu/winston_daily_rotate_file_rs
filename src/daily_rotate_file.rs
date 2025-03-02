@@ -63,15 +63,16 @@ impl DailyRotateFile {
 
     fn create_unique_file(log_dir: &Path, filename: &Path) -> std::io::Result<(File, PathBuf)> {
         let mut counter = 0;
+
+        let base_name = filename
+            .file_stem()
+            .unwrap_or_else(|| std::ffi::OsStr::new("log"));
+        let ext = filename.extension().and_then(|e| e.to_str()).unwrap_or("");
+
         loop {
             let new_filename = if counter == 0 {
                 filename.to_path_buf()
             } else {
-                let base_name = filename
-                    .file_stem()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("log"));
-                let ext = filename.extension().and_then(|e| e.to_str()).unwrap_or("");
-
                 let mut unique_filename = filename.to_path_buf();
                 unique_filename.set_file_name(if ext.is_empty() {
                     format!("{}_{}", base_name.to_string_lossy(), counter)
