@@ -1,4 +1,5 @@
 use chrono::{DateTime, Local, Utc};
+use flate2::{write::GzEncoder, Compression};
 use logform::{Format, LogInfo};
 use std::fs::{create_dir_all, File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
@@ -22,6 +23,7 @@ pub struct DailyRotateFile {
     file: Mutex<BufWriter<File>>,
     options: DailyRotateFileOptions,
     last_rotation: Mutex<DateTime<Utc>>,
+    file_path: Mutex<PathBuf>,
 }
 
 impl DailyRotateFile {
@@ -32,20 +34,21 @@ impl DailyRotateFile {
             Local::now().with_timezone(&Utc)
         };
 
-        let file =
+        let (file, path) =
             Self::create_file(&options, &current_date).expect("Failed to create initial log file");
 
         DailyRotateFile {
             file: Mutex::new(BufWriter::new(file)),
             options,
             last_rotation: Mutex::new(current_date),
+            file_path: Mutex::new(path),
         }
     }
 
     fn create_file(
         options: &DailyRotateFileOptions,
         date: &DateTime<Utc>,
-    ) -> std::io::Result<std::fs::File> {
+    ) -> std::io::Result<(File, PathBuf)> {
         let filename =
             Self::get_filename(&options.filename, date, &options.date_pattern, options.utc);
 
@@ -58,7 +61,7 @@ impl DailyRotateFile {
         Self::create_unique_file(log_dir, &filename)
     }
 
-    fn create_unique_file(log_dir: &Path, filename: &Path) -> std::io::Result<std::fs::File> {
+    fn create_unique_file(log_dir: &Path, filename: &Path) -> std::io::Result<(File, PathBuf)> {
         let mut counter = 0;
         loop {
             let new_filename = if counter == 0 {
@@ -84,7 +87,7 @@ impl DailyRotateFile {
                 .create_new(true)
                 .open(&new_filename)
             {
-                Ok(file) => return Ok(file),
+                Ok(file) => return Ok((file, new_filename)),
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                     counter += 1;
                     continue;
@@ -155,13 +158,97 @@ impl DailyRotateFile {
 
     fn rotate(&self) {
         let now = Utc::now();
-        let new_file = Self::create_file(&self.options, &now).expect("Failed to rotate log file");
 
-        let mut file_lock = self.file.lock().unwrap();
-        *file_lock = BufWriter::new(new_file);
+        if let Ok(mut file_guard) = self.file.lock() {
+            let _ = file_guard.flush();
+        }
 
-        let mut last_rotation = self.last_rotation.lock().unwrap();
-        *last_rotation = now;
+        let previous_file_path = self.file_path.lock().unwrap().clone();
+
+        let (new_file, new_path) =
+            Self::create_file(&self.options, &now).expect("Failed to rotate log file");
+
+        // Replace the existing file with the new one
+        if let Ok(mut file_lock) = self.file.lock() {
+            *file_lock = BufWriter::new(new_file);
+        }
+
+        if let Ok(mut path_lock) = self.file_path.lock() {
+            *path_lock = new_path;
+        }
+
+        if let Ok(mut last_rotation) = self.last_rotation.lock() {
+            *last_rotation = now;
+        }
+
+        if self.options.zipped_archive {
+            if let Err(e) = Self::compress_file(&previous_file_path) {
+                eprintln!("Failed to compress log file: {}", e);
+            }
+        }
+    }
+
+    pub fn compress_file(file_path: &Path) -> std::io::Result<()> {
+        let mut counter = 0;
+
+        let base_name = file_path
+            .file_stem()
+            .unwrap_or_else(|| std::ffi::OsStr::new("compressed"));
+
+        let original_ext = file_path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("");
+
+        loop {
+            let attempt_path = if counter == 0 {
+                if original_ext.is_empty() {
+                    file_path.with_file_name(format!("{}.gz", base_name.to_string_lossy()))
+                } else {
+                    file_path.with_file_name(format!(
+                        "{}.{}.gz",
+                        base_name.to_string_lossy(),
+                        original_ext
+                    ))
+                }
+            } else {
+                let unique_filename = if original_ext.is_empty() {
+                    format!("{}_{}.gz", base_name.to_string_lossy(), counter)
+                } else {
+                    format!(
+                        "{}.{}_{}.gz",
+                        base_name.to_string_lossy(),
+                        original_ext,
+                        counter
+                    )
+                };
+
+                file_path.with_file_name(unique_filename)
+            };
+
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&attempt_path)
+            {
+                Ok(gz_file) => {
+                    let input_file = File::open(file_path)?;
+                    let mut encoder = GzEncoder::new(gz_file, Compression::default());
+
+                    std::io::copy(&mut &input_file, &mut encoder)?;
+                    encoder.finish()?;
+
+                    std::fs::remove_file(file_path)?;
+
+                    return Ok(());
+                }
+                Err(e) if e.kind() == ErrorKind::AlreadyExists => {
+                    counter += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 
     pub fn builder() -> DailyRotateFileBuilder {
@@ -415,5 +502,55 @@ mod tests {
             10,
             "Expected 10 log files due to size rotation"
         );
+    }
+
+    #[test]
+    fn test_compressed_archive() {
+        let temp_dir = setup_temp_dir();
+        let transport = DailyRotateFile::builder()
+            .filename(temp_dir.path().join("test.log"))
+            //.filename("logs/test.log")
+            .max_size(80) // Small size to force rotation `Test message x` plus new line is 15 bytes each * 5 = 75 + 5 buffer
+            .zipped_archive(true)
+            .build()
+            .expect("Failed to create transport");
+
+        // Create log entries to force rotation
+        for i in 0..5 {
+            let log_info = LogInfo {
+                level: "info".to_string(),
+                message: format!("Test message {}", i),
+                meta: Default::default(),
+            };
+            transport.log(log_info);
+        }
+
+        // Add more entries to trigger another rotation
+        // this entry will hit max size at about the 3rd message
+        // which means it will cause a rotation and still keep an open file containing the last 2 messages
+        for i in 0..5 {
+            let log_info = LogInfo {
+                level: "info".to_string(),
+                message: format!("Test message final {}", i),
+                meta: Default::default(),
+            };
+            transport.log(log_info);
+        }
+
+        // Check if .gz files were created
+        let gz_files: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext == "gz")
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        assert!(gz_files.len() == 2, "Expected 2 .gz files");
     }
 }
