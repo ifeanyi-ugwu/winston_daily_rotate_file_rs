@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, Utc};
 use flate2::{write::GzEncoder, Compression};
 use logform::{Format, LogInfo};
-use std::fs::{create_dir_all, File, OpenOptions};
+use std::fs::{create_dir_all, read_dir, File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -187,6 +187,12 @@ impl DailyRotateFile {
                 eprintln!("Failed to compress log file: {}", e);
             }
         }
+
+        if let Some(max_files) = self.options.max_files {
+            if let Err(e) = self.cleanup_old_files(max_files) {
+                eprintln!("Failed to clean up old log files: {}", e);
+            }
+        }
     }
 
     pub fn compress_file(file_path: &Path) -> std::io::Result<()> {
@@ -250,6 +256,101 @@ impl DailyRotateFile {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    fn cleanup_old_files(&self, max_files: u32) -> std::io::Result<()> {
+        //println!("cleaning up");
+
+        let log_dir = self
+            .options
+            .dirname
+            .as_deref()
+            .or_else(|| self.options.filename.parent())
+            .unwrap_or_else(|| Path::new("."));
+
+        let base_name = self
+            .options
+            .filename
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("log");
+
+        let mut log_files: Vec<PathBuf> = Vec::new();
+
+        // add all log files, zipped ones inclusive
+        for entry in read_dir(log_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+
+            if path.is_file() {
+                let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+                //println!("Checking file: {}", filename);
+                //println!("Base name: {}", base_name);
+
+                // Check if it's one of our log files ("basename.date" and "basename_N.date" formats)
+                if filename.starts_with(&format!("{}.", base_name))
+                    || filename.starts_with(&format!("{}_", base_name))
+                {
+                    log_files.push(path);
+                }
+            }
+        }
+
+        //println!("log files found: {:?}", log_files);
+
+        if log_files.len() <= max_files as usize {
+            return Ok(());
+        }
+
+        // Sort by modification time (newest first)
+        log_files.sort_by(|a, b| {
+            let a_time = a
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or_else(|| std::time::SystemTime::UNIX_EPOCH);
+
+            let b_time = b
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or_else(|| std::time::SystemTime::UNIX_EPOCH);
+
+            b_time.cmp(&a_time)
+        });
+
+        for file in &log_files {
+            println!("Detected log file: {}", file.display());
+        }
+
+        // Keep only max_files
+        for old_file in log_files.iter().skip(max_files as usize) {
+            //println!("Deleting file: {}", old_file.display());
+
+            // don't delete active log file
+            let current_path = self.file_path.lock().map(|p| p.clone()).unwrap_or_default();
+            if old_file == &current_path {
+                continue;
+            }
+
+            if self.options.zipped_archive
+                && old_file.extension().and_then(|e| e.to_str()) != Some("gz")
+            {
+                // compress_file also deletes the original file
+                //let _ = Self::compress_file(old_file);
+                if let Err(e) = Self::compress_file(old_file) {
+                    eprintln!("Failed to compress old file {}: {}", old_file.display(), e);
+                }
+            } else {
+                //let _ = std::fs::remove_file(old_file);
+                if let Err(e) = std::fs::remove_file(old_file) {
+                    eprintln!("Failed to remove old file {}: {}", old_file.display(), e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     pub fn builder() -> DailyRotateFileBuilder {
@@ -553,5 +654,38 @@ mod tests {
             .collect();
 
         assert!(gz_files.len() == 2, "Expected 2 .gz files");
+    }
+
+    #[test]
+    fn test_max_files_cleanup() {
+        let temp_dir = setup_temp_dir();
+        let transport = DailyRotateFile::builder()
+            .filename(temp_dir.path().join("test.log"))
+            //.filename("logs/test.log")
+            .date_pattern("%Y-%m-%d_%H-%M-%S")
+            .max_files(2)
+            .build()
+            .expect("Failed to create transport");
+
+        for i in 0..5 {
+            transport.log(LogInfo {
+                level: "info".to_string(),
+                message: format!("Message {}", i),
+                meta: Default::default(),
+            });
+
+            // simulate date change
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+
+        transport.flush().expect("Failed to flush");
+
+        let files: Vec<_> = fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .collect();
+
+        assert_eq!(files.len(), 2, "Expected exactly 2 log files after cleanup");
     }
 }
