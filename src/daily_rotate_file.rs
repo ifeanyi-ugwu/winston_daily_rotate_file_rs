@@ -195,7 +195,7 @@ impl DailyRotateFile {
         }
     }
 
-    pub fn compress_file(file_path: &Path) -> std::io::Result<()> {
+    fn compress_file(file_path: &Path) -> std::io::Result<()> {
         let mut counter = 0;
 
         let base_name = file_path
