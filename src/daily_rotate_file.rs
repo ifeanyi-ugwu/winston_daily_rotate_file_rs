@@ -385,6 +385,36 @@ impl Transport for DailyRotateFile {
         //println!("File size after: {}", self.get_file_size()); //deadlocks
     }
 
+    fn log_batch(&self, infos: Vec<LogInfo>) {
+        if infos.is_empty() {
+            return;
+        }
+
+        // Calculate the total size of the batch to determine if rotation is needed before writing
+        let total_batch_size: usize = infos
+            .iter()
+            .map(|info| format!("{}\n", info.message).len())
+            .sum();
+
+        if self.should_rotate(total_batch_size) {
+            self.rotate();
+        }
+
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            Err(_) => {
+                eprintln!("Failed to acquire file lock for batch logging");
+                return;
+            }
+        };
+
+        for info in infos {
+            if let Err(e) = writeln!(file, "{}", info.message) {
+                eprintln!("Failed to write log entry in batch: {}", e);
+            }
+        }
+    }
+
     fn flush(&self) -> Result<(), String> {
         let mut file = self.file.lock().unwrap();
         file.flush().map_err(|e| format!("Failed to flush: {}", e))
