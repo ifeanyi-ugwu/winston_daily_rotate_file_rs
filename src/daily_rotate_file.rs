@@ -4,12 +4,12 @@ use logform::{Format, LogInfo};
 use std::fs::{create_dir_all, read_dir, File, OpenOptions};
 use std::io::{BufWriter, ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use winston_transport::Transport;
 
 pub struct DailyRotateFileOptions {
     pub level: Option<String>,
-    pub format: Option<Format>,
+    pub format: Option<Arc<dyn Format<Input = LogInfo> + Send + Sync>>,
     pub filename: PathBuf,
     pub date_pattern: String,
     pub max_files: Option<u32>,
@@ -424,14 +424,14 @@ impl Transport for DailyRotateFile {
         self.options.level.as_ref()
     }
 
-    fn get_format(&self) -> Option<&Format> {
-        self.options.format.as_ref()
+    fn get_format(&self) -> Option<Arc<dyn Format<Input = LogInfo> + Send + Sync>> {
+        self.options.format.clone()
     }
 }
 
 pub struct DailyRotateFileBuilder {
     level: Option<String>,
-    format: Option<Format>,
+    format: Option<Arc<dyn Format<Input = LogInfo> + Send + Sync>>,
     filename: Option<PathBuf>,
     date_pattern: String,
     max_files: Option<u32>,
@@ -461,7 +461,7 @@ impl DailyRotateFileBuilder {
         self
     }
 
-    pub fn format(mut self, format: Format) -> Self {
+    pub fn format(mut self, format: Arc<dyn Format<Input = LogInfo> + Send + Sync>) -> Self {
         self.format = Some(format);
         self
     }
