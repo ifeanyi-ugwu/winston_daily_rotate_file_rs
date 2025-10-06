@@ -358,7 +358,7 @@ impl DailyRotateFile {
     }
 }
 
-impl Transport for DailyRotateFile {
+impl Transport<LogInfo> for DailyRotateFile {
     fn log(&self, info: LogInfo) {
         let entry_size = format!("{}\n", info.message).len();
 
@@ -418,14 +418,6 @@ impl Transport for DailyRotateFile {
     fn flush(&self) -> Result<(), String> {
         let mut file = self.file.lock().unwrap();
         file.flush().map_err(|e| format!("Failed to flush: {}", e))
-    }
-
-    fn get_level(&self) -> Option<&String> {
-        self.options.level.as_ref()
-    }
-
-    fn get_format(&self) -> Option<Arc<dyn Format<Input = LogInfo> + Send + Sync>> {
-        self.options.format.clone()
     }
 }
 

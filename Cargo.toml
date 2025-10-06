@@ -11,8 +11,8 @@ authors = ["ifeanyi ugwu"]
 [dependencies]
 chrono = "0.4.39"
 flate2 = "1.0.35"
-logform = "0.5.1"
-winston_transport = "0.5.0"
+logform = "0.6.2"
+winston_transport = "0.6.0"
 
 [dev-dependencies]
 tempfile = "3.17.1"
